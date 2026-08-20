@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:async';
 
 void main() => runApp(MyApp());
 
@@ -23,8 +25,62 @@ class WakeScreen extends StatefulWidget {
 class _WakeScreenState extends State<WakeScreen> {
   bool isLoading = false;
   String status = "Готов к работе";
+  final TextEditingController macController = TextEditingController();
   final TextEditingController ipController = TextEditingController();
   final TextEditingController portController = TextEditingController();
+
+  // Метод отправки WOL-пакета
+  void sendWOL(String mac, String ip, int port) async {
+    try {
+      // Очищаем MAC-адрес от лишних символов
+      String cleanMac = mac.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+      if (cleanMac.length != 12) {
+        throw Exception('Неверный MAC-адрес');
+      }
+
+      // Преобразуем MAC в байты
+      List<int> macBytes = [];
+      for (int i = 0; i < cleanMac.length; i += 2) {
+        macBytes.add(int.parse(cleanMac.substring(i, i + 2), radix: 16));
+      }
+
+      // Формируем Magic Packet: 6 байт 0xFF + 16 раз MAC-адрес
+      Uint8List packet = Uint8List(6 + 16 * 6);
+      for (int i = 0; i < 6; i++) {
+        packet[i] = 0xFF;
+      }
+      for (int i = 0; i < 16; i++) {
+        for (int j = 0; j < 6; j++) {
+          packet[6 + i * 6 + j] = macBytes[j];
+        }
+      }
+
+      // Отправляем пакет
+      RawDatagramSocket socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.send(packet, InternetAddress(ip), port);
+      socket.close();
+
+      setState(() {
+        status = "✅ Компьютер должен включиться!";
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Magic Packet отправлен!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      setState(() {
+        status = "❌ Ошибка: $e";
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
 
   @override
   void initState() {
@@ -35,49 +91,39 @@ class _WakeScreenState extends State<WakeScreen> {
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      ipController.text = prefs.getString('server_ip') ?? '192.168.1.100';
-      portController.text = prefs.getString('server_port') ?? '5000';
+      macController.text = prefs.getString('mac') ?? '';
+      ipController.text = prefs.getString('ip') ?? '192.168.1.255';
+      portController.text = prefs.getString('port') ?? '9';
     });
   }
 
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('server_ip', ipController.text);
-    await prefs.setString('server_port', portController.text);
+    await prefs.setString('mac', macController.text);
+    await prefs.setString('ip', ipController.text);
+    await prefs.setString('port', portController.text);
   }
 
-  void wakeComputer() async {
+  void wakeComputer() {
     setState(() {
       isLoading = true;
-      status = "Отправка запроса...";
+      status = "Отправка WOL-пакета...";
     });
 
     try {
-      await _saveSettings();
+      String mac = macController.text.trim();
       String ip = ipController.text.trim();
-      String port = portController.text.trim();
-      String url = "http://$ip:$port/wake";
+      int port = int.tryParse(portController.text.trim()) ?? 9;
 
-      final response = await http.get(Uri.parse(url)).timeout(
-        Duration(seconds: 5),
-        onTimeout: () => throw Exception('Сервер не отвечает'),
-      );
-
-      if (response.statusCode == 200) {
-        setState(() {
-          status = "✅ Компьютер включается!";
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Компьютер включается!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } else {
-        setState(() {
-          status = "❌ Ошибка: ${response.statusCode}";
-        });
+      if (mac.isEmpty) {
+        throw Exception('MAC-адрес не введён');
       }
+      if (ip.isEmpty) {
+        throw Exception('IP-адрес не введён');
+      }
+
+      _saveSettings();
+      sendWOL(mac, ip, port);
     } catch (e) {
       setState(() {
         status = "❌ Ошибка: $e";
@@ -116,7 +162,7 @@ class _WakeScreenState extends State<WakeScreen> {
             ),
             SizedBox(height: 10),
             Text(
-              'Убедись, что WOL-сервер запущен на ПК',
+              'Введи MAC и IP-адрес компьютера',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
             SizedBox(height: 30),
@@ -129,10 +175,20 @@ class _WakeScreenState extends State<WakeScreen> {
               child: Column(
                 children: [
                   TextField(
+                    controller: macController,
+                    decoration: InputDecoration(
+                      labelText: 'MAC-адрес',
+                      hintText: 'AA:BB:CC:DD:EE:FF',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.settings_ethernet),
+                    ),
+                  ),
+                  SizedBox(height: 10),
+                  TextField(
                     controller: ipController,
                     decoration: InputDecoration(
-                      labelText: 'IP адрес сервера',
-                      hintText: 'Например: 192.168.1.100',
+                      labelText: 'IP-адрес (Broadcast)',
+                      hintText: '192.168.1.255',
                       border: OutlineInputBorder(),
                       prefixIcon: Icon(Icons.dns),
                     ),
@@ -142,8 +198,8 @@ class _WakeScreenState extends State<WakeScreen> {
                   TextField(
                     controller: portController,
                     decoration: InputDecoration(
-                      labelText: 'Порт сервера',
-                      hintText: '5000',
+                      labelText: 'Порт',
+                      hintText: '9',
                       border: OutlineInputBorder(),
                       prefixIcon: Icon(Icons.settings_ethernet),
                     ),
